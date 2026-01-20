@@ -114,7 +114,7 @@ Now provide your evaluation and ranking:"""
 
 async def stage3_synthesize_final(
     user_query: str,
-    stage1_results: List[Dict[str, Any]],
+    stage2_5_results: List[Dict[str, Any]],
     stage2_results: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
     """
@@ -122,16 +122,16 @@ async def stage3_synthesize_final(
 
     Args:
         user_query: The original user query
-        stage1_results: Individual model responses from Stage 1
+        stage2_5_results: Self-corrected responses from Stage 2.5 (after peer feedback)
         stage2_results: Rankings from Stage 2
 
     Returns:
         Dict with 'model' and 'response' keys
     """
-    # Build comprehensive context for chairman
-    stage1_text = "\n\n".join([
-        f"Model: {result['model']}\nResponse: {result['response']}"
-        for result in stage1_results
+    # Build comprehensive context for chairman using corrected responses
+    stage2_5_text = "\n\n".join([
+        f"Model: {result['model']}\nCorrected Response: {result['corrected_response']}"
+        for result in stage2_5_results
     ])
 
     stage2_text = "\n\n".join([
@@ -139,18 +139,18 @@ async def stage3_synthesize_final(
         for result in stage2_results
     ])
 
-    chairman_prompt = f"""You are the Chairman of an LLM Council. Multiple AI models have provided responses to a user's question, and then ranked each other's responses.
+    chairman_prompt = f"""You are the Chairman of an LLM Council. Multiple AI models have provided responses to a user's question, received peer feedback, and then corrected their responses based on that feedback.
 
 Original Question: {user_query}
 
-STAGE 1 - Individual Responses:
-{stage1_text}
+STAGE 2.5 - Corrected Responses (after peer review):
+{stage2_5_text}
 
 STAGE 2 - Peer Rankings:
 {stage2_text}
 
 Your task as Chairman is to synthesize all of this information into a single, comprehensive, accurate answer to the user's original question. Consider:
-- The individual responses and their insights
+- The corrected responses that have incorporated peer feedback
 - The peer rankings and what they reveal about response quality
 - Any patterns of agreement or disagreement
 
@@ -208,6 +208,67 @@ def parse_ranking_from_text(ranking_text: str) -> List[str]:
     return matches
 
 
+def format_peer_critiques(
+    model: str,
+    stage2_results: List[Dict[str, Any]]
+) -> str:
+    """
+    Format peer critiques for a specific model, excluding its own evaluation.
+
+    Args:
+        model: The model identifier to get critiques for
+        stage2_results: Results from Stage 2 (peer rankings/evaluations)
+
+    Returns:
+        Formatted string containing all peer evaluations with attribution
+    """
+    critiques = []
+    
+    for result in stage2_results:
+        # Skip the model's own evaluation (models shouldn't see their own critique)
+        if result['model'] == model:
+            continue
+        
+        critic_model = result['model']
+        critique_text = result['ranking']
+        
+        critiques.append(f"Peer evaluation from {critic_model}:\n{critique_text}")
+    
+    return "\n\n".join(critiques)
+
+
+def build_correction_prompt(
+    user_query: str,
+    original_response: str,
+    peer_critiques: str
+) -> str:
+    """
+    Build the Stage 2.5 correction prompt for a model.
+
+    Args:
+        user_query: The original user question
+        original_response: The model's original Stage 1 response
+        peer_critiques: Formatted peer feedback text
+
+    Returns:
+        The prompt string for the correction request
+    """
+    return f"""You previously answered a question, and your peers have provided feedback on your response.
+
+Original Question: {user_query}
+
+Your Original Answer:
+{original_response}
+
+Peer Feedback:
+
+{peer_critiques}
+
+Based on this feedback from your peers, please provide a corrected and improved version of your response. Address the valid criticisms and incorporate any useful suggestions while maintaining the strengths of your original answer.
+
+Corrected Response:"""
+
+
 def calculate_aggregate_rankings(
     stage2_results: List[Dict[str, Any]],
     label_to_model: Dict[str, str]
@@ -255,6 +316,71 @@ def calculate_aggregate_rankings(
     return aggregate
 
 
+async def stage2_5_collect_corrections(
+    user_query: str,
+    stage1_results: List[Dict[str, Any]],
+    stage2_results: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """
+    Stage 2.5: Each model corrects its response based on peer feedback.
+
+    Args:
+        user_query: The original user query
+        stage1_results: Individual model responses from Stage 1
+        stage2_results: Peer rankings/evaluations from Stage 2
+
+    Returns:
+        List of dicts with model, original_response, peer_critiques, and corrected_response
+    """
+    import asyncio
+    
+    # Build correction tasks for each model
+    tasks = []
+    task_metadata = []
+    
+    for stage1_result in stage1_results:
+        model = stage1_result['model']
+        original_response = stage1_result['response']
+        
+        # Collect peer critiques (exclude self-evaluation)
+        peer_critiques = format_peer_critiques(model, stage2_results)
+        
+        # Build correction prompt
+        prompt = build_correction_prompt(user_query, original_response, peer_critiques)
+        messages = [{"role": "user", "content": prompt}]
+        
+        # Create async task for this model
+        tasks.append(query_model(model, messages))
+        task_metadata.append({
+            'model': model,
+            'original_response': original_response,
+            'peer_critiques': peer_critiques
+        })
+    
+    # Query all models in parallel
+    responses = await asyncio.gather(*tasks)
+    
+    # Format results with fallback to original response if model fails
+    stage2_5_results = []
+    for i, metadata in enumerate(task_metadata):
+        response = responses[i]
+        
+        # Use corrected response if available, otherwise fall back to original
+        if response is not None:
+            corrected_response = response.get('content', metadata['original_response'])
+        else:
+            corrected_response = metadata['original_response']
+        
+        stage2_5_results.append({
+            'model': metadata['model'],
+            'original_response': metadata['original_response'],
+            'peer_critiques': metadata['peer_critiques'],
+            'corrected_response': corrected_response
+        })
+    
+    return stage2_5_results
+
+
 async def generate_conversation_title(user_query: str) -> str:
     """
     Generate a short title for a conversation based on the first user message.
@@ -293,22 +419,22 @@ Title:"""
     return title
 
 
-async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
+async def run_full_council(user_query: str) -> Tuple[List, List, List, Dict, Dict]:
     """
-    Run the complete 3-stage council process.
+    Run the complete council process including Stage 2.5.
 
     Args:
         user_query: The user's question
 
     Returns:
-        Tuple of (stage1_results, stage2_results, stage3_result, metadata)
+        Tuple of (stage1_results, stage2_results, stage2_5_results, stage3_result, metadata)
     """
     # Stage 1: Collect individual responses
     stage1_results = await stage1_collect_responses(user_query)
 
     # If no models responded successfully, return error
     if not stage1_results:
-        return [], [], {
+        return [], [], [], {
             "model": "error",
             "response": "All models failed to respond. Please try again."
         }, {}
@@ -319,10 +445,13 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
     # Calculate aggregate rankings
     aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
 
-    # Stage 3: Synthesize final answer
+    # Stage 2.5: Collect self-corrections based on peer feedback
+    stage2_5_results = await stage2_5_collect_corrections(user_query, stage1_results, stage2_results)
+
+    # Stage 3: Synthesize final answer (now uses Stage 2.5 corrected responses)
     stage3_result = await stage3_synthesize_final(
         user_query,
-        stage1_results,
+        stage2_5_results,
         stage2_results
     )
 
@@ -332,4 +461,4 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
         "aggregate_rankings": aggregate_rankings
     }
 
-    return stage1_results, stage2_results, stage3_result, metadata
+    return stage1_results, stage2_results, stage2_5_results, stage3_result, metadata

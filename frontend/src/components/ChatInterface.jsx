@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import Stage1 from './Stage1';
 import Stage2 from './Stage2';
+import Stage2_5 from './Stage2_5';
 import Stage3 from './Stage3';
 import './ChatInterface.css';
 
@@ -94,6 +95,17 @@ export default function ChatInterface({
                       labelToModel={msg.metadata?.label_to_model}
                       aggregateRankings={msg.metadata?.aggregate_rankings}
                     />
+                  )}
+
+                  {/* Stage 2.5 */}
+                  {msg.loading?.stage2_5 && (
+                    <div className="stage-loading">
+                      <div className="spinner"></div>
+                      <span>Running Stage 2.5: Self-corrections based on peer feedback...</span>
+                    </div>
+                  )}
+                  {msg.stage2_5 && (
+                    <Stage2_5 corrections={msg.stage2_5} />
                   )}
 
                   {/* Stage 3 */}

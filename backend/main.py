@@ -10,7 +10,7 @@ import json
 import asyncio
 
 from . import storage
-from .council import run_full_council, generate_conversation_title, stage1_collect_responses, stage2_collect_rankings, stage3_synthesize_final, calculate_aggregate_rankings
+from .council import run_full_council, generate_conversation_title, stage1_collect_responses, stage2_collect_rankings, stage2_5_collect_corrections, stage3_synthesize_final, calculate_aggregate_rankings
 
 app = FastAPI(title="LLM Council API")
 
@@ -82,7 +82,7 @@ async def get_conversation(conversation_id: str):
 @app.post("/api/conversations/{conversation_id}/message")
 async def send_message(conversation_id: str, request: SendMessageRequest):
     """
-    Send a message and run the 3-stage council process.
+    Send a message and run the full council process (including Stage 2.5).
     Returns the complete response with all stages.
     """
     # Check if conversation exists
@@ -101,8 +101,8 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
         title = await generate_conversation_title(request.content)
         storage.update_conversation_title(conversation_id, title)
 
-    # Run the 3-stage council process
-    stage1_results, stage2_results, stage3_result, metadata = await run_full_council(
+    # Run the full council process (now includes Stage 2.5)
+    stage1_results, stage2_results, stage2_5_results, stage3_result, metadata = await run_full_council(
         request.content
     )
 
@@ -111,6 +111,7 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
         conversation_id,
         stage1_results,
         stage2_results,
+        stage2_5_results,
         stage3_result
     )
 
@@ -118,6 +119,7 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
     return {
         "stage1": stage1_results,
         "stage2": stage2_results,
+        "stage2_5": stage2_5_results,
         "stage3": stage3_result,
         "metadata": metadata
     }
@@ -158,9 +160,14 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
             aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
             yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'aggregate_rankings': aggregate_rankings}})}\n\n"
 
-            # Stage 3: Synthesize final answer
+            # Stage 2.5: Collect self-corrections based on peer feedback
+            yield f"data: {json.dumps({'type': 'stage2_5_start'})}\n\n"
+            stage2_5_results = await stage2_5_collect_corrections(request.content, stage1_results, stage2_results)
+            yield f"data: {json.dumps({'type': 'stage2_5_complete', 'data': stage2_5_results})}\n\n"
+
+            # Stage 3: Synthesize final answer (now uses corrected responses from Stage 2.5)
             yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
-            stage3_result = await stage3_synthesize_final(request.content, stage1_results, stage2_results)
+            stage3_result = await stage3_synthesize_final(request.content, stage2_5_results, stage2_results)
             yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
 
             # Wait for title generation if it was started
@@ -174,6 +181,7 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                 conversation_id,
                 stage1_results,
                 stage2_results,
+                stage2_5_results,
                 stage3_result
             )
 

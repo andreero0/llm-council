@@ -164,3 +164,6 @@ Frontend: Display with tabs + validation UI
 ```
 
 The entire flow is async/parallel where possible to minimize latency.
+
+## Recent Changes
+- 001-peer-critique-self-correction: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
